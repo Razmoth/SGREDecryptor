@@ -26,11 +26,24 @@ void Parse(ParseResult result)
 
 void Main(DirectoryInfo dir)
 {
-    foreach (FileInfo file in dir.EnumerateFiles("*.m"))
+    foreach (FileInfo file in dir.EnumerateFiles("*.*", SearchOption.AllDirectories))
     {
         try
         {
-            Decrypt(file);
+            FileType type;
+            switch (file.Extension)
+            {
+                case ".m":
+                    type = FileType.Manifest;
+                    break;
+                case ".webm":
+                    type = FileType.Movie;
+                    break;
+                default:
+                    continue;
+            }
+
+            Decrypt(file, type);
             Console.WriteLine($"Decrypted {file.Name} !!");
         }
         catch (Exception e)
@@ -40,8 +53,10 @@ void Main(DirectoryInfo dir)
     }
 }
 
-void Decrypt(FileInfo file)
+void Decrypt(FileInfo file, FileType type)
 {
+    int decompressedSize = 0;
+
     Console.WriteLine($"File: {file.FullName}");
 
     if (file.Length < 8)
@@ -52,16 +67,19 @@ void Decrypt(FileInfo file)
     using Stream stream = file.OpenRead();
     using BinaryReader reader = new(stream);
 
-    int signature = reader.ReadInt32();
-    Console.WriteLine($"Signature: 0x{signature:X8}");
-
-    if (signature != 0x737A6D) // mzs
+    if (type == FileType.Manifest)
     {
-        throw new InvalidDataException("Not a valid mzs signature !!");
-    }
+        int signature = reader.ReadInt32();
+        Console.WriteLine($"Signature: 0x{signature:X8}");
 
-    int decompressedSize = reader.ReadInt32();
-    Console.WriteLine($"DecompressedSize: 0x{decompressedSize:X8}");
+        if (signature != 0x737A6D) // mzs
+        {
+            throw new InvalidDataException("Not a valid mzs signature !!");
+        }
+
+        decompressedSize = reader.ReadInt32();
+        Console.WriteLine($"DecompressedSize: 0x{decompressedSize:X8}");
+    }
 
     long size = stream.Length - stream.Position;
     Console.WriteLine($"Size: 0x{size:X16}");
@@ -92,7 +110,21 @@ void Decrypt(FileInfo file)
 
     MT19937 mt = new(seedUints);
 
-    int blockSize = 0x83;
+    int blockSize = 0;
+
+    if (type == FileType.Manifest)
+    {
+        blockSize = 0x83;
+    }
+    else if (type == FileType.Movie)
+    {
+        blockSize = 0x1000;
+    }
+    else
+    {
+        throw new InvalidOperationException("Unexpected FileType !!");
+    }
+
     Span<byte> xorpad = stackalloc byte[blockSize];
     Span<byte> next = stackalloc byte[4];
     Span<uint> nextUints = MemoryMarshal.Cast<byte, uint>(next);
@@ -130,17 +162,32 @@ void Decrypt(FileInfo file)
 
     ms.Position = 0;
 
-    using ZstandardStream zstdStream = new(ms, CompressionMode.Decompress);
-    using MemoryStream output = new();
-
-    zstdStream.CopyTo(output);
-
-    if (output.Length != decompressedSize)
+    MemoryStream output;
+    if (type == FileType.Manifest)
     {
-        throw new InvalidDataException("Decompressed size mismatch !!");
+        using ZstandardStream zstdStream = new(ms, CompressionMode.Decompress);
+        MemoryStream ds = new();
+
+        zstdStream.CopyTo(ds);
+
+        if (ds.Length != decompressedSize)
+        {
+            throw new InvalidDataException("Decompressed size mismatch !!");
+        }
+
+        ds.Position = 0;
+
+        output = ds;
+    }
+    else if (type == FileType.Movie)
+    {
+        output = ms;
+    }
+    else
+    {
+        throw new InvalidOperationException("Unexpected FileType !!");
     }
 
-    output.Position = 0;
 
     if (file.Directory != null)
     {
@@ -148,5 +195,12 @@ void Decrypt(FileInfo file)
         string outputPath = Path.Combine(outputDir.FullName, file.Name);
         using FileStream outFile = File.OpenWrite(outputPath);
         output.CopyTo(outFile);
+        output.Dispose();
     }
+}
+
+enum FileType
+{
+    Manifest,
+    Movie
 }
